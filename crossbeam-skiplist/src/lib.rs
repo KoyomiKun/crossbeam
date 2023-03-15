@@ -228,10 +228,11 @@
 //! }
 //! ```
 
+// 控制rustdoc如何
 #![doc(test(
-    no_crate_inject,
+    no_crate_inject, // 默认会给每个doctest加一个extern crate my_crate;，用这个来disable
     attr(
-        deny(warnings, rust_2018_idioms),
+        deny(warnings, rust_2018_idioms), // 任何有warining的地方都会导致编译失败;推动您朝Rust 2018的惯例前进的Lint
         allow(dead_code, unused_assignments, unused_variables)
     )
 ))]
@@ -241,10 +242,12 @@
     rust_2018_idioms,
     unreachable_pub
 )]
-#![cfg_attr(not(feature = "std"), no_std)]
+// 条件编译
+#![cfg_attr(not(feature = "std"), no_std)] // 将#[no_std]赋值为#[not(feature = "std")]
 
 use cfg_if::cfg_if;
 
+// rustc 参数crossbeam_no_atomic_cas 不存在时
 #[cfg(not(crossbeam_no_atomic_cas))]
 cfg_if! {
     if #[cfg(feature = "alloc")] {
@@ -259,6 +262,7 @@ cfg_if! {
     }
 }
 
+// 如果平台不支持atomic cas
 cfg_if! {
     if #[cfg(feature = "std")] {
         pub mod map;

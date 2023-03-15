@@ -26,9 +26,10 @@ const HEIGHT_MASK: usize = (1 << HEIGHT_BITS) - 1;
 ///
 /// The actual size of the tower will vary depending on the height that a node
 /// was allocated with.
-#[repr(C)]
+// skiplist 的一个node的指针vec结构，这个指针应当是线程安全的
+#[repr(C)] // 字段的顺序、大小和对齐方式与你在 C 或 C++ 中期望的完全一样。任何你期望通过 FFI 边界的类型都应该有repr(C)
 struct Tower<K, V> {
-    pointers: [Atomic<Node<K, V>>; 0],
+    pointers: [Atomic<Node<K, V>>; 0], // 原子指针，可以在线程之间安全共享的裸指针类型, 初始高度为0
 }
 
 impl<K, V> Index<usize> for Tower<K, V> {
@@ -36,7 +37,8 @@ impl<K, V> Index<usize> for Tower<K, V> {
     fn index(&self, index: usize) -> &Atomic<Node<K, V>> {
         // This implementation is actually unsafe since we don't check if the
         // index is in-bounds. But this is fine since this is only used internally.
-        unsafe { &*(&self.pointers as *const Atomic<Node<K, V>>).add(index) }
+        // 这里甚至没有检查数组是否越界
+        unsafe { &*(&self.pointers as *const Atomic<Node<K, V>>).add(index) } // 将数组指针位置向前+index个 length(当然必须是对齐的) 然后解引用后返回值的借用
     }
 }
 
@@ -46,7 +48,7 @@ impl<K, V> Index<usize> for Tower<K, V> {
 /// tower.
 #[repr(C)]
 struct Head<K, V> {
-    pointers: [Atomic<Node<K, V>>; MAX_HEIGHT],
+    pointers: [Atomic<Node<K, V>>; MAX_HEIGHT], // 头部一开始就初始化到最大高度了
 }
 
 impl<K, V> Head<K, V> {
@@ -55,15 +57,16 @@ impl<K, V> Head<K, V> {
     fn new() -> Head<K, V> {
         // Initializing arrays in rust is a pain...
         Head {
-            pointers: Default::default(),
+            pointers: Default::default(), // rust中默认的array就是一个32长度的
         }
     }
 }
 
+// 解引用出来是一个tower
 impl<K, V> Deref for Head<K, V> {
     type Target = Tower<K, V>;
     fn deref(&self) -> &Tower<K, V> {
-        unsafe { &*(self as *const _ as *const Tower<K, V>) }
+        unsafe { &*(self as *const _ as *const Tower<K, V>) } // 因为内存结构是相同的所以可以直接强制转换? 中间需要先转指针再转特定结构指针
     }
 }
 
@@ -84,8 +87,8 @@ struct Node<K, V> {
     /// Keeps the reference count and the height of its tower.
     ///
     /// The reference count is equal to the number of `Entry`s pointing to this node, plus the
-    /// number of levels in which this node is installed.
-    refs_and_height: AtomicUsize,
+    /// number of levels in which this node is installed. 高位是rf，低位是node的level
+    refs_and_height: AtomicUsize, // 原子类型的usize 8bytes  引用计数和高度共享，共同进行一个原子操作 仅仅是为了节省空间？还是考虑到逻辑上这两个的修改互斥？
 
     /// The tower of atomic pointers.
     tower: Tower<K, V>,
@@ -98,6 +101,9 @@ impl<K, V> Node<K, V> {
     /// with null pointers. However, the key and the value will be left uninitialized, and that is
     /// why this function is unsafe.
     unsafe fn alloc(height: usize, ref_count: usize) -> *mut Self {
+        // 将内存块初始化，并转换为指向self的裸指针;
+        // https://rrmprogramming.com/article/memory-alignment-and-layout-in-rust/
+        // 优化点1: 将tower和node分配在相邻内存上
         let layout = Self::get_layout(height);
         let ptr = alloc(layout).cast::<Self>();
         if ptr.is_null() {
@@ -106,7 +112,7 @@ impl<K, V> Node<K, V> {
 
         ptr::write(
             &mut (*ptr).refs_and_height,
-            AtomicUsize::new((height - 1) | ref_count << HEIGHT_BITS),
+            AtomicUsize::new((height - 1) | ref_count << HEIGHT_BITS), // 后5位放高度，前64-5位放rc
         );
         ptr::write_bytes((*ptr).tower.pointers.as_mut_ptr(), 0, height);
         ptr
@@ -123,12 +129,15 @@ impl<K, V> Node<K, V> {
 
     /// Returns the layout of a node with the given `height`.
     unsafe fn get_layout(height: usize) -> Layout {
+        // layout 看成是一个内存块, 保存了结构体的信息 + Tower 信息
         assert!((1..=MAX_HEIGHT).contains(&height));
 
-        let size_self = mem::size_of::<Self>();
-        let align_self = mem::align_of::<Self>();
-        let size_pointer = mem::size_of::<Atomic<Self>>();
+        let size_self = mem::size_of::<Self>(); // 结构体本身的大小
+        let align_self = mem::align_of::<Self>(); // 结构体本身的对齐
+        let size_pointer = mem::size_of::<Atomic<Self>>(); // 结构体本身的可变裸指针
 
+        // 内存大小 = 本身结构体的大小 + tower的指针大小,
+        // 等于把tower的内存也给分配了，而且靠的很近，更好的利用cpu cache
         Layout::from_size_align_unchecked(size_self + size_pointer * height, align_self)
     }
 
